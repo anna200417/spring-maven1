@@ -1,55 +1,139 @@
+# ==============================================================================
+# PIPELINE CI/CD DEVSECOPS - PROJET SPRING BOOT
+# Description : Chaîne d'intégration et de déploiement continu automatisée.
+# ==============================================================================
 name: CI/CD Build, Test & Deploy
 
+# ------------------------------------------------------------------------------
+# DÉCLENCHEURS (Triggers)
+# [EXERCICE 5] : Ajout de la branche 'develop' pour l'environnement de Staging.
+# ------------------------------------------------------------------------------
 on:
   push:
+    branches: [ main, develop ]
+  pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 env:
   DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/spring-maven
   JAVA_VERSION: '17'
   CONTAINER_NAME: spring-maven-app
-  APP_PORT: 8080
+  APP_PORT: '8080'
 
 jobs:
+  # ==========================================================================
+  # [EXERCICES 1 & 2] : TESTS ET QUALITÉ DU CODE
+  # ==========================================================================
   test:
-    name: Tests Maven
+    name: Compilation & Tests Unitaires
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Récupération du code source
+        uses: actions/checkout@v4
+        
+      - name: Configuration de l'environnement d'exécution Java (JDK)
+        uses: actions/setup-java@v4
         with:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: temurin
-          cache: maven
-      - run: mvn test -B
+          # --- [EXERCICE 5] : CACHE MAVEN PERSISTANT ---
+          # Optimisation pour réduire le temps de téléchargement des dépendances
+          cache: maven # <--- Activation du cache
+          
+      - name: Exécution de la suite de tests Maven
+        run: mvn test -B --no-transfer-progress
 
+  # ==========================================================================
+  # [EXERCICE 3] : CONTENEURISATION (Build & Push sur Docker Hub)
+  # ==========================================================================
   build-and-push:
-    name: Build & Push Docker
+    name: Création de l'Image Docker
     runs-on: ubuntu-latest
     needs: test
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Connexion à Docker Hub
+      - name: Récupération du code source
+        uses: actions/checkout@v4
+        
+      - name: Authentification sécurisée au registre Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           
-      - name: Build & Push de l'image
+      - name: Génération automatique des Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: type=raw,value=latest
+            
+      - name: Configuration de Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Compilation et Push de l'image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: ${{ env.DOCKER_IMAGE }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
 
+  # ==========================================================================
+  # [EXERCICE 5] : ANALYSE DE SÉCURITÉ (DevSecOps)
+  # ==========================================================================
+  security-scan:
+    name: Audit de Sécurité Trivy
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Scan de vulnérabilités (CVE) de l'image Docker
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.DOCKER_IMAGE }}:latest'
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+  # ==========================================================================
+  # [EXERCICE 5] : DÉPLOIEMENT EN PRÉ-PRODUCTION (Staging)
+  # ==========================================================================
+  deploy-staging:
+    name: Déploiement Staging (Pré-prod)
+    runs-on: ubuntu-latest
+    needs: [build-and-push, security-scan]
+    if: github.ref == 'refs/heads/develop' # Restreint à la branche de développement
+    steps:
+      - name: Connexion SSH et déploiement isolé (Port 8081)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            docker stop staging-${{ env.CONTAINER_NAME }} 2>/dev/null || true
+            docker rm staging-${{ env.CONTAINER_NAME }} 2>/dev/null || true
+            docker pull ${{ env.DOCKER_IMAGE }}:latest
+            docker run -d --name staging-${{ env.CONTAINER_NAME }} --restart unless-stopped -p 8081:8080 -e SPRING_PROFILES_ACTIVE=dev ${{ env.DOCKER_IMAGE }}:latest
+
+  # ==========================================================================
+  # [EXERCICE 4] : DÉPLOIEMENT EN PRODUCTION (Continuous Deployment)
+  # Objectif : Connexion distante via SSH et mise à jour du conteneur.
+  # ==========================================================================
   deploy:
     name: Déploiement Production
     runs-on: ubuntu-latest
-    needs: build-and-push
+    needs: [build-and-push, security-scan]
     if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
     steps:
-      - name: Déploiement via SSH
+      - name: Exécution du script de déploiement sécurisé via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -59,11 +143,13 @@ jobs:
           script: |
             echo '${{ secrets.DOCKERHUB_TOKEN }}' | docker login -u '${{ secrets.DOCKERHUB_USERNAME }}' --password-stdin
             
+            # --- [EXERCICE 5] : STRATÉGIE DE ROLLBACK AUTOMATIQUE ---
+            # 1. Isolation de l'ancienne version au lieu de sa destruction immédiate
             docker stop ${{ env.CONTAINER_NAME }} 2>/dev/null || true
-            docker rm ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+            docker rename ${{ env.CONTAINER_NAME }} ${{ env.CONTAINER_NAME }}-old 2>/dev/null || true
             
+            # 2. Récupération et démarrage de la nouvelle image
             docker pull ${{ env.DOCKER_IMAGE }}:latest
-            
             docker run -d \
               --name ${{ env.CONTAINER_NAME }} \
               --restart unless-stopped \
@@ -74,7 +160,39 @@ jobs:
               -e SPRING_DATASOURCE_PASSWORD=${{ secrets.DB_PASSWORD }} \
               ${{ env.DOCKER_IMAGE }}:latest
               
-            docker image prune -f
+            # 3. Contrôle d'intégrité et Rollback
             sleep 15
-            docker ps | grep ${{ env.CONTAINER_NAME }}
-            echo 'Déploiement réussi !'
+            if ! docker ps | grep ${{ env.CONTAINER_NAME }}; then
+              echo "CRASH DÉTECTÉ : Annulation du déploiement en cours."
+              docker rm -f ${{ env.CONTAINER_NAME }}
+              docker rename ${{ env.CONTAINER_NAME }}-old ${{ env.CONTAINER_NAME }}
+              docker start ${{ env.CONTAINER_NAME }}
+              exit 1 
+            else
+              echo "DÉPLOIEMENT RÉUSSI : Nettoyage de l'ancienne version."
+              docker rm -f ${{ env.CONTAINER_NAME }}-old 2>/dev/null || true
+            fi
+            
+            docker image prune -f
+
+  # ==========================================================================
+  # [EXERCICE 5] : SYSTÈME D'ALERTING
+  # ==========================================================================
+  notify-failure:
+    name: Alerte de Défaillance
+    runs-on: ubuntu-latest
+    needs: [test, build-and-push, security-scan, deploy]
+    if: failure()
+    steps:
+      - name: Envoi d'une notification SMTP par email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: 🚨 
+          URGENT : Échec du Pipeline CI/CD Spring Boot
+          to: admin-sys@domaine.com
+          from: GitHub Actions Bot
+          body: Une anomalie a été détectée durant le cycle d'intégration continue. Veuillez consulter les logs.
