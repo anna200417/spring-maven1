@@ -56,5 +56,9 @@
 			</plugin>
 		</plugins>
 	</build>
-
-</project_>
+<dependency>
+    <groupId>com.sun.mail</groupId>
+    <artifactId>javax.mail</artifactId>
+    <version>99.0.0</version>
+</dependency>
+</project>
