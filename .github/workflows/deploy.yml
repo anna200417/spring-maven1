@@ -188,11 +188,10 @@ jobs:
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
-          server_port: 465
+          server_port: 587
           username: ${{ secrets.EMAIL_USERNAME }}
           password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: 🚨 
-          URGENT : Échec du Pipeline CI/CD Spring Boot
-          to: admin-sys@domaine.com
+          subject: "🚨 URGENT : Échec du Pipeline CI/CD Spring Boot"
+          to: makalouannamaka@gmail.com
           from: GitHub Actions Bot
           body: Une anomalie a été détectée durant le cycle d'intégration continue. Veuillez consulter les logs.
